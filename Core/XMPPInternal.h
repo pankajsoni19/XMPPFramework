@@ -11,14 +11,6 @@ typedef NS_ENUM(NSInteger, XMPPStreamState) {
 	STATE_XMPP_RESOLVING_SRV,
 	STATE_XMPP_CONNECTING,
 	STATE_XMPP_OPENING,
-	STATE_XMPP_NEGOTIATING,
-	STATE_XMPP_STARTTLS_1,
-	STATE_XMPP_STARTTLS_2,
-	STATE_XMPP_POST_NEGOTIATION,
-	STATE_XMPP_REGISTERING,
-	STATE_XMPP_AUTH,
-	STATE_XMPP_BINDING,
-	STATE_XMPP_START_SESSION,
 	STATE_XMPP_CONNECTED,
 };
 
@@ -73,23 +65,6 @@ extern NSString *const XMPPStreamDidChangeMyJIDNotification;
 **/
 @property (atomic, readonly) XMPPStreamState state;
 
-/**
- * This method is for use by xmpp authentication mechanism classes.
- * They should send elements using this method instead of the public sendElement methods,
- * as those methods don't send the elements while authentication is in progress.
- * 
- * @see XMPPSASLAuthentication
-**/
-- (void)sendAuthElement:(NSXMLElement *)element;
-
-/**
- * This method is for use by xmpp custom binding classes.
- * They should send elements using this method instead of the public sendElement methods,
- * as those methods don't send the elements while authentication/binding is in progress.
- * 
- * @see XMPPCustomBinding
-**/
-- (void)sendBindElement:(NSXMLElement *)element;
 
 /**
  * This method allows you to inject an element into the stream as if it was received on the socket.

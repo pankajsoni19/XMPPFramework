@@ -4,6 +4,7 @@
 #import "XMPPTimer.h"
 #import "XMPPLogging.h"
 #import "NSNumber+XMPP.h"
+#import "XMPPStreamManagementMemoryStorage.h"
 
 #if ! __has_feature(objc_arc)
 #warning This file must be compiled with ARC. Use -fobjc-arc flag (or convert project to ARC).
@@ -39,23 +40,13 @@
 	// State machine
 	
 	BOOL isStarted;    // either <enabled/> or <resumed/> received from server
-	BOOL enableQueued; // the <enable/> element is queued in xmppStream
-	BOOL enableSent;   // the <enable/> element has been sent through xmppStream
 	
 	BOOL wasCleanDisconnect; // xmppStream sent </stream:stream>
-	
-	BOOL didAttemptResume;
-	BOOL didResume;
-	
-	NSXMLElement *resume_response;
-	NSArray *resume_stanzaIds;
-	
+			
 	NSDate *disconnectDate;
 	
 	// Configuration
-	
-	BOOL autoResume;
-	
+		
 	NSUInteger autoRequest_stanzaCount;
 	NSTimeInterval autoRequest_timeout;
 	
@@ -113,6 +104,12 @@
 	return [self initWithStorage:nil dispatchQueue:queue];
 }
 
+- (id)initDefault
+{
+    XMPPStreamManagementMemoryStorage *mgmtStorage = [[XMPPStreamManagementMemoryStorage alloc] init];
+    return [self initWithStorage: mgmtStorage];
+}
+            
 - (id)initWithStorage:(id <XMPPStreamManagementStorage>)inStorage
 {
 	return [self initWithStorage:inStorage dispatchQueue:NULL];
@@ -154,37 +151,6 @@
 #pragma mark Configuration
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-- (BOOL)autoResume
-{
-	XMPPLogTrace();
-	
-	__block BOOL result = NO;
-	
-	dispatch_block_t block = ^{
-		result = autoResume;
-	};
-	
-	if (dispatch_get_specific(moduleQueueTag))
-		block();
-	else
-		dispatch_sync(moduleQueue, block);
-	
-	return result;
-}
-
-- (void)setAutoResume:(BOOL)newAutoResume
-{
-	XMPPLogTrace();
-	
-	dispatch_block_t block = ^{
-		autoResume = newAutoResume;
-	};
-	
-	if (dispatch_get_specific(moduleQueueTag))
-		block();
-	else
-		dispatch_async(moduleQueue, block);
-}
 
 - (void)automaticallyRequestAcksAfterStanzaCount:(NSUInteger)stanzaCount orTimeout:(NSTimeInterval)timeout
 {
@@ -311,83 +277,78 @@
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-#pragma mark Enable
+#pragma mark Util
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/**
- * This method sends the <enable> stanza to the server to request enabling stream management.
- *
- * XEP-0198 specifies that the <enable> stanza should only be sent by clients after authentication,
- * and after binding has occurred.
- * 
- * The servers response is reported via the delegate methods:
- * @see xmppStreamManagement:wasEnabled:
- * @see xmppStreamManagement:wasNotEnabled:
- *
- * @param supportsResumption
- *   Whether the client should request resumptions support.
- *   If YES, the resume attribute will be included. E.g. <enable resume='true'/>
- * 
- * @param maxTimeout
- *   Allows you to specify the client's preferred maximum resumption time.
- *   This is optional, and will only be sent if you provide a positive value (maxTimeout > 0.0).
- *   Note that XEP-0198 only supports sending this value in seconds.
- *   So it the provided maxTimeout includes millisecond precision, this will be ignored via truncation
- *   (rounding down to nearest whole seconds value).
- * 
- * @see supportsStreamManagement
-**/
-- (void)enableStreamManagementWithResumption:(BOOL)supportsResumption maxTimeout:(NSTimeInterval)maxTimeout
+- (uint32_t) lastHandledCount
 {
-	dispatch_block_t block = ^{ @autoreleasepool{
-		
-		if (isStarted)
-		{
-			XMPPLogWarn(@"Stream management is already enabled/resumed.");
-			return;
-		}
-		if (enableQueued || enableSent)
-		{
-			XMPPLogWarn(@"Stream management is already started (pending response from server).");
-			return;
-		}
-		
-		// State transition cleanup
-		
-		[unackedByServer removeAllObjects];
-		unackedByServer_lastRequestOffset = 0;
-		
-		[unackedByClient removeAllObjects];
-		unackedByClient_lastAckOffset = 0;
-		
-		unprocessedReceivedAcks = nil;
-		
-		pendingHandledStanzaIds = nil;
-		outstandingStanzaIds = 0;
-		
-		// Send enable stanza:
-		//
-		// <enable xmlns='urn:xmpp:sm:3' ... />
-		
-		NSXMLElement *enable = [NSXMLElement elementWithName:@"enable" xmlns:XMLNS_STREAM_MANAGEMENT];
-		
-		if (supportsResumption) {
-			[enable addAttributeWithName:@"resume" stringValue:@"true"];
-		}
-		if (maxTimeout > 0.0) {
-			[enable addAttributeWithName:@"max" stringValue:[NSString stringWithFormat:@"%.0f", maxTimeout]];
-		}
-		
-		[xmppStream sendElement:enable];
-		
-		enableQueued = YES;
-		requestedMax = (maxTimeout > 0.0) ? (uint32_t)maxTimeout : (uint32_t)0;
-	}};
-	
-	if (dispatch_get_specific(moduleQueueTag))
-		block();
-	else
-		dispatch_async(moduleQueue, block);
+    return lastHandledByClient;
+}
+
+- (NSString *) smSessionId
+{
+    NSString *resumptionId = nil;
+    uint32_t timeout = 0;
+    NSDate *lastDisconnect = nil;
+    
+    [storage getResumptionId:&resumptionId
+                     timeout:&timeout
+              lastDisconnect:&lastDisconnect
+                   forStream:xmppStream];
+    
+    if ([self canResumeStreamWithResumptionId:resumptionId timeout:timeout lastDisconnect:lastDisconnect])
+    {
+        return resumptionId;
+    }
+    else
+    {
+        return nil;
+    }
+}
+
+- (void)resetState
+{
+    dispatch_block_t block = ^{ @autoreleasepool{
+        // State transition cleanup
+        
+        [unackedByServer removeAllObjects];
+        unackedByServer_lastRequestOffset = 0;
+        
+        [unackedByClient removeAllObjects];
+        unackedByClient_lastAckOffset = 0;
+        
+        unprocessedReceivedAcks = nil;
+        
+        pendingHandledStanzaIds = nil;
+        outstandingStanzaIds = 0;
+    
+        isStarted = NO;
+        
+        uint32_t newLastHandledByClient = 0;
+        uint32_t newLastHandledByServer = 0;
+        NSArray *pendingOutgoingStanzas = nil;
+        
+        [storage getLastHandledByClient:&newLastHandledByClient
+                    lastHandledByServer:&newLastHandledByServer
+                 pendingOutgoingStanzas:&pendingOutgoingStanzas
+                              forStream:xmppStream];
+        
+        lastHandledByClient = newLastHandledByClient;
+        lastHandledByServer = newLastHandledByServer;
+        
+        if ([pendingOutgoingStanzas count] > 0) {
+            prev_unackedByServer = [[NSMutableArray alloc] initWithArray:pendingOutgoingStanzas copyItems:YES];
+        }
+        
+        XMPPLogVerbose(@"%@: Attempting to resume: lastHandledByClient(%u) lastHandledByServer(%u)",
+                       THIS_FILE, lastHandledByClient, lastHandledByServer);
+    }};
+    
+    if (dispatch_get_specific(moduleQueueTag))
+        block();
+    else
+        dispatch_async(moduleQueue, block);
+    
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -442,10 +403,6 @@
 	
 	dispatch_block_t block = ^{ @autoreleasepool{
 		
-		if (isStarted || enableQueued || enableSent) {
-			return_from_block;
-		}
-		
 		NSString *resumptionId = nil;
 		uint32_t timeout = 0;
 		NSDate *lastDisconnect = nil;
@@ -464,68 +421,6 @@
 		dispatch_sync(moduleQueue, block);
 	
 	return result;
-}
-
-/**
- * Internal method that handles sending the <resume/> element, and the corresponding state transition.
-**/
-- (void)sendResumeRequestWithResumptionId:(NSString *)resumptionId
-{
-	XMPPLogTrace();
-	
-	dispatch_block_t block = ^{ @autoreleasepool {
-		
-		// State transition cleanup
-		
-		[unackedByServer removeAllObjects];
-		unackedByServer_lastRequestOffset = 0;
-		
-		[unackedByClient removeAllObjects];
-		unackedByClient_lastAckOffset = 0;
-		
-		unprocessedReceivedAcks = nil;
-		
-		pendingHandledStanzaIds = nil;
-		outstandingStanzaIds = 0;
-		
-		// Restore our state from the last stream
-		
-		uint32_t newLastHandledByClient = 0;
-		uint32_t newLastHandledByServer = 0;
-		NSArray *pendingOutgoingStanzas = nil;
-		
-		[storage getLastHandledByClient:&newLastHandledByClient
-		            lastHandledByServer:&newLastHandledByServer
-		         pendingOutgoingStanzas:&pendingOutgoingStanzas
-		                      forStream:xmppStream];
-		
-		lastHandledByClient = newLastHandledByClient;
-		lastHandledByServer = newLastHandledByServer;
-		
-		if ([pendingOutgoingStanzas count] > 0) {
-			prev_unackedByServer = [[NSMutableArray alloc] initWithArray:pendingOutgoingStanzas copyItems:YES];
-		}
-		
-		XMPPLogVerbose(@"%@: Attempting to resume: lastHandledByClient(%u) lastHandledByServer(%u)",
-		               THIS_FILE, lastHandledByClient, lastHandledByServer);
-		
-		// Send the resume stanza:
-		//
-		// <resume h='lastHandledByClient' previd='resumptionId'/>
-		
-		NSXMLElement *resume = [NSXMLElement elementWithName:@"resume" xmlns:XMLNS_STREAM_MANAGEMENT];
-		[resume addAttributeWithName:@"previd" stringValue:resumptionId];
-		[resume addAttributeWithName:@"h" stringValue:[NSString stringWithFormat:@"%u", lastHandledByClient]];
-		
-		[xmppStream sendBindElement:resume];
-		
-		didAttemptResume = YES;
-	}};
-	
-	if (dispatch_get_specific(moduleQueueTag))
-		block();
-	else
-		dispatch_async(moduleQueue, block);
 }
 
 /**
@@ -575,13 +470,9 @@
 		XMPPLogVerbose(@"%@: processResumed: lastHandledByServer(%u)", THIS_FILE, lastHandledByServer);
 		
 		isStarted = YES;
-		didResume = YES;
 		
 		prev_unackedByServer = nil;
-		
-		resume_response = resumed;
-		resume_stanzaIds = [stanzaIds copy];
-		
+				
 		// Update storage
 		
 		[storage setLastDisconnect:[NSDate date]
@@ -598,188 +489,6 @@
 		block();
 	else
 		dispatch_async(moduleQueue, block);
-}
-
-/**
- * This method is meant to be called by other extensions when they receive an xmppStreamDidAuthenticate callback.
- *
- * Returns YES if the stream was resumed during the authentication process.
- * Returns NO otherwise (if resume wasn't available, or it failed).
- *
- * Other extensions may wish to skip certain setup processes that aren't
- * needed if the stream was resumed (since the previous session state has been restored server-side).
-**/
-- (BOOL)didResume
-{
-	__block BOOL result = NO;
-	
-	dispatch_block_t block = ^{
-		result = didResume;
-	};
-	
-	if (dispatch_get_specific(moduleQueueTag))
-		block();
-	else
-		dispatch_sync(moduleQueue, block);
-	
-	return result;
-}
-
-/**
- * This method is meant to be called when you receive an xmppStreamDidAuthenticate callback.
- *
- * It is used instead of a standard delegate method in order to provide a cleaner API.
- * By using this method, one can put all the logic for handling authentication in a single place.
- * But more importantly, it solves several subtle timing and threading issues.
- *
- * > A delegate method could have hit either before or after xmppStreamDidAuthenticate, depending on thread scheduling.
- * > We could have queued it up, and forced it to hit after.
- * > But your code would likely still have needed to add a check within xmppStreamDidAuthenticate...
- *
- * @param stanzaIdsPtr (optional)
- *   Just like the stanzaIdsPtr provided in xmppStreamManagement:didReceiveAckForStanzaIds:.
- *   This comes from the h value provided within the <resumed h='X'/> stanza sent by the server.
- * 
- * @param responsePtr (optional)
- *   Returns the response we got from the server. Either <resumed/> or <failed/>.
- *   This will be nil if resume wasn't tried.
- * 
- * @return
- *   YES if the stream was resumed.
- *   NO otherwise.
-**/
-- (BOOL)didResumeWithAckedStanzaIds:(NSArray **)stanzaIdsPtr
-					 serverResponse:(NSXMLElement **)responsePtr
-{
-	__block BOOL result = NO;
-	__block NSArray *stanzaIds = nil;
-	__block NSXMLElement *response = nil;
-	
-	dispatch_block_t block = ^{
-		
-		result = didResume;
-		stanzaIds = resume_stanzaIds;
-		response = resume_response;
-	};
-	
-	if (dispatch_get_specific(moduleQueueTag))
-		block();
-	else
-		dispatch_sync(moduleQueue, block);
-	
-	if (stanzaIdsPtr) *stanzaIdsPtr = stanzaIds;
-	if (responsePtr) *responsePtr = response;
-	
-	return result;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-#pragma mark XMPPCustomBinding Protocol
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-/**
- * Attempts to start the custom binding process.
- *
- * If it isn't possible to start the process (perhaps due to missing information),
- * this method should return XMPP_BIND_FAIL and set an appropriate error message.
- * 
- * If binding isn't needed (for example, because custom SASL authentication already handled it),
- * this method should return XMPP_BIND_SUCCESS.
- * In this case, xmppStream will immediately move to its post-binding operations.
- *
- * Otherwise this method should send whatever stanzas are needed to begin the binding process.
- * And then return XMPP_BIND_CONTINUE.
- *
- * This method is called by automatically XMPPStream.
- * You MUST NOT invoke this method manually.
-**/
-- (XMPPBindResult)start:(NSError **)errPtr
-{
-	XMPPLogTrace();
-		
-	// Fetch the resumptionId,
-	// and check to see if we can resume the stream.
-	
-	NSString *resumptionId = nil;
-	uint32_t timeout = 0;
-	NSDate *lastDisconnect = nil;
-	
-	[storage getResumptionId:&resumptionId
-	                 timeout:&timeout
-	          lastDisconnect:&lastDisconnect
-	               forStream:xmppStream];
-	
-	if (![self canResumeStreamWithResumptionId:resumptionId timeout:timeout lastDisconnect:lastDisconnect])
-	{
-		return XMPP_BIND_FAIL_FALLBACK;
-	}
-	
-	// Start the resume proces
-	[self sendResumeRequestWithResumptionId:resumptionId];
-	
-	return XMPP_BIND_CONTINUE;
-}
-
-/**
- * After the custom binding process has started, all incoming xmpp stanzas are routed to this method.
- * The method should process the stanza as appropriate, and return the coresponding result.
- * If the process is not yet complete, it should return XMPP_BIND_CONTINUE,
- * meaning the xmpp stream will continue to forward all incoming xmpp stanzas to this method.
- *
- * This method is called automatically by XMPPStream.
- * You MUST NOT invoke this method manually.
-**/
-- (XMPPBindResult)handleBind:(NSXMLElement *)element withError:(NSError **)errPtr
-{
-	XMPPLogTrace();
-	
-	NSString *elementName = [element name];
-	
-	if ([elementName isEqualToString:@"resumed"])
-	{
-		[self processResumed:element];
-		
-		return XMPP_BIND_SUCCESS;
-	}
-	else
-	{
-		if (![elementName isEqualToString:@"failed"]) {
-			XMPPLogError(@"%@: Received unrecognized response from server: %@", THIS_METHOD, element);
-		}
-		
-		dispatch_async(moduleQueue, ^{ @autoreleasepool {
-			
-			didResume = NO;
-			resume_response = element;
-			
-			prev_unackedByServer = nil;
-		}});
-		
-		return XMPP_BIND_FAIL_FALLBACK;
-	}
-}
-
-/**
- * Optionally implement this method to override the default behavior.
- * By default behavior, we mean the behavior normally taken by xmppStream, which is:
- *
- * - IF the server includes <session xmlns='urn:ietf:params:xml:ns:xmpp-session'/> in its stream:features
- * - AND xmppStream.skipStartSession property is NOT set
- * - THEN xmppStream will send the session start request, and await the response before transitioning to authenticated
- *
- * Thus if you implement this method and return YES, then xmppStream will skip starting a session,
- * regardless of the stream:features and the current xmppStream.skipStartSession property value.
- *
- * If you implement this method and return NO, then xmppStream will follow the default behavior detailed above.
- * This means that, even if this method returns NO, the xmppStream may still skip starting a session if
- * the server doesn't require it via its stream:features,
- * or if the user has explicitly forbidden it via the xmppStream.skipStartSession property.
- *
- * The default value is NO.
-**/
-- (BOOL)shouldSkipStartSessionAfterSuccessfulBinding
-{
-	return YES;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -803,7 +512,7 @@
 	
 	dispatch_block_t block = ^{ @autoreleasepool{
 		
-		if (isStarted || enableQueued || enableSent)
+		if (isStarted)
 		{
 			[self _requestAck];
 		}
@@ -819,7 +528,7 @@
 {
 	XMPPLogTrace();
 	
-	if (isStarted || enableQueued || enableSent)
+	if (isStarted)
 	{
 		// Send the XML element
 		
@@ -839,7 +548,7 @@
 {
 	XMPPLogTrace();
 	
-	if (!isStarted && !(enableQueued || enableSent))
+	if (!isStarted)
 	{
 		// cannot request ack if not started (or at least sent <enable/>)
 		return NO;
@@ -1602,35 +1311,11 @@
 #pragma mark XMPPStream Delegate
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/**
- * Binding a JID resource is a standard part of the authentication process,
- * and occurs after SASL authentication completes (which generally authenticates the JID username).
- * 
- * This delegate method allows for a custom binding procedure to be used.
- * For example:
- * - a custom SASL authentication scheme might combine auth with binding
- * - stream management (xep-0198) replaces binding if it can resume a previous session
- * 
- * Return nil (or don't implement this method) if you wish to use the standard binding procedure.
-**/
-- (id <XMPPCustomBinding>)xmppStreamWillBind:(XMPPStream *)sender
-{
-	if (autoResume)
-	{
-		// We will check canResume in start: method (part of XMPPCustomBinding protocol)
-		return self;
-	}
-	else
-	{
-		return nil;
-	}
-}
-
 - (void)xmppStream:(XMPPStream *)sender didSendIQ:(XMPPIQ *)iq
 {
 	XMPPLogTrace();
 	
-	if (isStarted || enableSent)
+	if (isStarted)
 	{
 		[self processSentElement:iq];
 	}
@@ -1640,7 +1325,7 @@
 {
 	XMPPLogTrace();
 	
-	if (isStarted || enableSent)
+	if (isStarted)
 	{
 		[self processSentElement:message];
 	}
@@ -1650,7 +1335,7 @@
 {
 	XMPPLogTrace();
 	
-	if (isStarted || enableSent)
+	if (isStarted)
 	{
 		[self processSentElement:presence];
 	}
@@ -1723,21 +1408,10 @@
 {
 	XMPPLogTrace();
 	
-	if (enableQueued)
-	{
-		if ([[element name] isEqualToString:@"enable"])
-		{
-			enableQueued = NO;
-			enableSent = YES;
-		}
-	}
-	else if (isStarted)
-	{
-		if ([[element name] isEqualToString:@"r"])
-		{
-			[multicastDelegate xmppStreamManagementDidRequestAck:self];
-		}
-	}
+    if (isStarted && [[element name] isEqualToString:@"r"])
+    {
+         [multicastDelegate xmppStreamManagementDidRequestAck:self];
+    }
 }
 
 - (void)xmppStream:(XMPPStream *)sender didReceiveCustomElement:(NSXMLElement *)element
@@ -1785,54 +1459,42 @@
 	}
 	else if ([elementName isEqualToString:@"enabled"])
 	{
-		if (enableSent)
-		{
-			// <enabled xmlns='urn:xmpp:sm:3' id='some-long-sm-id' resume='true'/>
-			
-			NSString *resumptionId = nil;
-			uint32_t max = 0;
-			
-			BOOL canResume = [element attributeBoolValueForName:@"resume" withDefaultValue:NO];
-			if (canResume)
-			{
-				resumptionId = [element attributeStringValueForName:@"id"];
-				max = [element attributeUInt32ValueForName:@"max" withDefaultValue:requestedMax];
-			}
-			
-			[storage setResumptionId:resumptionId
-			                 timeout:max
-			          lastDisconnect:[NSDate date]
-			               forStream:xmppStream];
-			
-			[multicastDelegate xmppStreamManagement:self wasEnabled:element];
-			
-			isStarted = YES;
-			enableSent = NO;
-			
-			lastHandledByClient = 0;
-			lastHandledByServer = 0;
-			
-			unprocessedReceivedAcks = nil;
-		}
-		else
-		{
-			XMPPLogWarn(@"Received unrequested <enabled/> stanza");
-		}
+        NSString *resumptionId = nil;
+        uint32_t max = 0;
+        
+        BOOL canResume = [element attributeBoolValueForName:@"resume" withDefaultValue:NO];
+        if (canResume)
+        {
+            resumptionId = [element attributeStringValueForName:@"id"];
+            max = [element attributeUInt32ValueForName:@"max" withDefaultValue:requestedMax];
+        }
+        
+        [storage setResumptionId:resumptionId
+                         timeout:max
+                  lastDisconnect:[NSDate date]
+                       forStream:xmppStream];
+        
+        [multicastDelegate xmppStreamManagement:self wasEnabled:element];
+        
+        isStarted = YES;
+        
+        BOOL sendInitialPresence = [element attributeBoolValueForName:@"presence" withDefaultValue:NO];
+        
+        lastHandledByClient = 0;
+        lastHandledByServer = sendInitialPresence ? 1 : 0;
+        
+        unprocessedReceivedAcks = nil;
 	}
 	else if ([elementName isEqualToString:@"failed"])
 	{
-		if (enableSent)
-		{
-			[storage removeAllForStream:xmppStream];
-			
-			[multicastDelegate xmppStreamManagement:self wasNotEnabled:element];
-			
-			isStarted = NO;
-			enableSent = NO;
-			
-			[autoRequestTimer cancel];
-			autoRequestTimer = nil;
-		}
+        [storage removeAllForStream:xmppStream];
+        
+        [multicastDelegate xmppStreamManagement:self wasNotEnabled:element];
+        
+        isStarted = NO;
+        
+        [autoRequestTimer cancel];
+        autoRequestTimer = nil;
 	}
 }
 
@@ -1865,21 +1527,12 @@
 	}
 	
 	// Reset temporary state variables
-	
 	isStarted = NO;
-	enableQueued = NO;
-	enableSent = NO;
 	
 	wasCleanDisconnect = NO;
-	
-	didAttemptResume = NO;
-	didResume = NO;
-	
+    
 	prev_unackedByServer = nil;
-	
-	resume_response = nil;
-	resume_stanzaIds = nil;
-	
+		
 	// Cancel timers
 	
 	[autoRequestTimer cancel];
@@ -1899,31 +1552,5 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 @implementation XMPPStream (XMPPStreamManagement)
-
-- (BOOL)supportsStreamManagement
-{
-	__block BOOL result = NO;
-	
-	dispatch_block_t block = ^{ @autoreleasepool {
-		
-		// The root element can be properly queried anytime after the
-		// stream:features are received, and TLS has been setup (if required).
-		
-		if (self.state >= STATE_XMPP_POST_NEGOTIATION)
-		{
-			NSXMLElement *features = [self.rootElement elementForName:@"stream:features"];
-			NSXMLElement *sm = [features elementForName:@"sm" xmlns:XMLNS_STREAM_MANAGEMENT];
-			
-			result = (sm != nil);
-		}
-	}};
-	
-	if (dispatch_get_specific(self.xmppQueueTag))
-		block();
-	else
-		dispatch_sync(self.xmppQueue, block);
-	
-	return result;
-}
 
 @end

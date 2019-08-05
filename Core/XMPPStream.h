@@ -1,6 +1,4 @@
 #import <Foundation/Foundation.h>
-#import "XMPPSASLAuthentication.h"
-#import "XMPPCustomBinding.h"
 #import "GCDMulticastDelegate.h"
 #import "CocoaAsyncSocket/GCDAsyncSocket.h"
 
@@ -35,12 +33,6 @@ typedef NS_ENUM(NSUInteger, XMPPStreamErrorCode) {
 	XMPPStreamUnsupportedAction, // The server doesn't support the requested action
 };
 
-typedef NS_ENUM(NSUInteger, XMPPStreamStartTLSPolicy) {
-    XMPPStreamStartTLSPolicyAllowed,   // TLS will be used if the server requires it
-    XMPPStreamStartTLSPolicyPreferred, // TLS will be used if the server offers it
-    XMPPStreamStartTLSPolicyRequired   // TLS will be used if the server offers it, else the stream won't connect
-};
-
 extern const NSTimeInterval XMPPStreamTimeoutNone;
 
 @interface XMPPStream : NSObject <GCDAsyncSocketDelegate>
@@ -53,12 +45,6 @@ extern const NSTimeInterval XMPPStreamTimeoutNone;
  * See the P2P section below.
 **/
 - (id)init;
-
-/**
- * Peer to Peer XMPP initialization.
- * The stream is a direct client to client connection as outlined in XEP-0174.
-**/
-- (id)initP2PFrom:(XMPPJID *)myJID;
 
 /**
  * XMPPStream uses a multicast delegate.
@@ -110,15 +96,6 @@ extern const NSTimeInterval XMPPStreamTimeoutNone;
 @property (readwrite, assign) UInt16 hostPort;
 
 /**
- * The stream's policy on when to Start TLS.
- *
- * The default is XMPPStreamStartTLSPolicyAllowed.
- *
- * @see XMPPStreamStartTLSPolicy
-**/
-@property (readwrite, assign) XMPPStreamStartTLSPolicy startTLSPolicy;
-
-/**
  * The JID of the user.
  * 
  * This value is required, and is used in many parts of the underlying implementation.
@@ -149,11 +126,8 @@ extern const NSTimeInterval XMPPStreamTimeoutNone;
  * just in case the resource was changed by the server.
 **/
 @property (readwrite, copy) XMPPJID *myJID;
-
-/**
- * Only used in P2P streams.
-**/
-@property (strong, readonly) XMPPJID *remoteJID;
+@property (readwrite, copy) NSString *password;
+@property (readwrite, assign) BOOL shouldSendInitialPresence;
 
 /**
  * Many routers will teardown a socket mapping if there is no activity on the socket.
@@ -234,22 +208,6 @@ extern const NSTimeInterval XMPPStreamTimeoutNone;
 @property (readwrite, strong) id tag;
 
 /**
- * RFC 6121 states that starting a session is no longer required.
- * To skip this step set skipStartSession to YES.
- *
- * [RFC3921] specified one additional
- * precondition: formal establishment of an instant messaging and
- * presence session.  Implementation and deployment experience has
- * shown that this additional step is unnecessary.  However, for
- * backward compatibility an implementation MAY still offer that
- * feature.  This enables older software to connect while letting
- * newer software save a round trip.
- *
- * The default value is NO.
-**/
-@property (readwrite, assign) BOOL skipStartSession;
-
-/**
  * Validates that a response element is FROM the jid that the request element was sent TO.
  * Supports validating responses when request didn't specify a TO.
  *
@@ -326,40 +284,6 @@ extern const NSTimeInterval XMPPStreamTimeoutNone;
 - (BOOL)connectWithTimeout:(NSTimeInterval)timeout error:(NSError **)errPtr;
 
 /**
- * THIS IS DEPRECATED BY THE XMPP SPECIFICATION.
- * 
- * The xmpp specification outlines the proper use of SSL/TLS by negotiating
- * the startTLS upgrade within the stream negotiation.
- * This method exists for those ancient servers that still require the connection to be secured prematurely.
- * The timeout is optional. To not time out use XMPPStreamTimeoutNone.
- *
- * Note: Such servers generally use port 5223 for this, which you will need to set.
-**/
-- (BOOL)oldSchoolSecureConnectWithTimeout:(NSTimeInterval)timeout error:(NSError **)errPtr;
-
-/**
- * Starts a P2P connection to the given user and given address.
- * The timeout is optional. To not time out use XMPPStreamTimeoutNone.
- * This method only works with XMPPStream objects created using the initP2P method.
- * 
- * The given address is specified as a sockaddr structure wrapped in a NSData object.
- * For example, a NSData object returned from NSNetservice's addresses method.
-**/
-- (BOOL)connectTo:(XMPPJID *)remoteJID
-      withAddress:(NSData *)remoteAddr
-      withTimeout:(NSTimeInterval)timeout
-            error:(NSError **)errPtr;
-
-/**
- * Starts a P2P connection with the given accepted socket.
- * This method only works with XMPPStream objects created using the initP2P method.
- * 
- * The given socket should be a socket that has already been accepted.
- * The remoteJID will be extracted from the opening stream negotiation.
-**/
-- (BOOL)connectP2PWithSocket:(GCDAsyncSocket *)acceptedSocket error:(NSError **)errPtr;
-
-/**
  * Disconnects from the remote host by closing the underlying TCP socket connection.
  * The terminating </stream:stream> element is not sent to the server.
  * 
@@ -381,153 +305,8 @@ extern const NSTimeInterval XMPPStreamTimeoutNone;
 - (void)disconnectAfterSending;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-#pragma mark Security
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-/**
- * Returns YES if SSL/TLS was used to establish a connection to the server.
- * 
- * Some servers may require an "upgrade to TLS" in order to start communication,
- * so even if the connection was not explicitly secured, an ugrade to TLS may have occured.
- * 
- * See also the xmppStream:willSecureWithSettings: delegate method.
-**/
-- (BOOL)isSecure;
-
-/**
- * Returns whether or not the server supports securing the connection via SSL/TLS.
- * 
- * Some servers will actually require a secure connection,
- * in which case the stream will attempt to secure the connection during the opening process.
- * 
- * If the connection has already been secured, this method may return NO.
-**/
-- (BOOL)supportsStartTLS;
-
-/**
- * Attempts to secure the connection via SSL/TLS.
- * 
- * This method is asynchronous.
- * The SSL/TLS handshake will occur in the background, and
- * the xmppStreamDidSecure: delegate method will be called after the TLS process has completed.
- * 
- * This method returns immediately.
- * If the secure process was started, it will return YES.
- * If there was an issue while starting the security process,
- * this method will return NO and set the error parameter.
- * 
- * The errPtr parameter is optional - you may pass nil.
- * 
- * You may wish to configure the security settings via the xmppStream:willSecureWithSettings: delegate method.
- * 
- * If the SSL/TLS handshake fails, the connection will be closed.
- * The reason for the error will be reported via the xmppStreamDidDisconnect:withError: delegate method.
- * The error parameter will be an NSError object, and may have an error domain of kCFStreamErrorDomainSSL.
- * The corresponding error code is documented in Apple's Security framework, in SecureTransport.h
-**/
-- (BOOL)secureConnection:(NSError **)errPtr;
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-#pragma mark Registration
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-/**
- * In Band Registration.
- * Creating a user account on the xmpp server within the xmpp protocol.
- * 
- * The registerWithElements:error: method is asynchronous.
- * It will return immediately, and the delegate methods are used to determine success.
- * See the xmppStreamDidRegister: and xmppStream:didNotRegister: methods.
- * 
- * If there is something immediately wrong, such as the stream is not connected,
- * this method will return NO and set the error.
- * 
- * The errPtr parameter is optional - you may pass nil.
- * 
- * registerWithPassword:error: is a convience method for creating an account using the given username and password.
- *
- * Security Note:
- * The password will be sent in the clear unless the stream has been secured.
-**/
-- (BOOL)supportsInBandRegistration;
-- (BOOL)registerWithElements:(NSArray *)elements error:(NSError **)errPtr;
-- (BOOL)registerWithPassword:(NSString *)password error:(NSError **)errPtr;
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #pragma mark Authentication
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-/**
- * Returns the server's list of supported authentication mechanisms.
- * Each item in the array will be of type NSString.
- * 
- * For example, if the server supplied this stanza within it's reported stream:features:
- * 
- * <mechanisms xmlns="urn:ietf:params:xml:ns:xmpp-sasl">
- *     <mechanism>DIGEST-MD5</mechanism>
- *     <mechanism>PLAIN</mechanism>
- * </mechanisms>
- * 
- * Then this method would return [@"DIGEST-MD5", @"PLAIN"].
-**/
-- (NSArray *)supportedAuthenticationMechanisms;
-
-/**
- * Returns whether or not the given authentication mechanism name was specified in the
- * server's list of supported authentication mechanisms.
- * 
- * Note: The authentication classes often provide a category on XMPPStream, adding useful methods.
- * 
- * @see XMPPPlainAuthentication - supportsPlainAuthentication
- * @see XMPPDigestMD5Authentication - supportsDigestMD5Authentication
- * @see XMPPXFacebookPlatformAuthentication - supportsXFacebookPlatformAuthentication
- * @see XMPPDeprecatedPlainAuthentication - supportsDeprecatedPlainAuthentication
- * @see XMPPDeprecatedDigestAuthentication - supportsDeprecatedDigestAuthentication
-**/
-- (BOOL)supportsAuthenticationMechanism:(NSString *)mechanism;
-
-/**
- * This is the root authentication method.
- * All other authentication methods go through this one.
- * 
- * This method attempts to start the authentication process given the auth instance.
- * That is, this method will invoke start: on the given auth instance.
- * If it returns YES, then the stream will enter into authentication mode.
- * It will then continually invoke the handleAuth: method on the given instance until authentication is complete.
- * 
- * This method is asynchronous.
- * 
- * If there is something immediately wrong, such as the stream is not connected,
- * the method will return NO and set the error.
- * Otherwise the delegate callbacks are used to communicate auth success or failure.
- * 
- * @see xmppStreamDidAuthenticate:
- * @see xmppStream:didNotAuthenticate:
- * 
- * @see authenticateWithPassword:error:
- * 
- * Note: The security process is abstracted in order to provide flexibility,
- *       and allow developers to easily implement their own custom authentication protocols.
- *       The authentication classes often provide a category on XMPPStream, adding useful methods.
- * 
- * @see XMPPXFacebookPlatformAuthentication - authenticateWithFacebookAccessToken:error:
-**/
-- (BOOL)authenticate:(id <XMPPSASLAuthentication>)auth error:(NSError **)errPtr;
-
-/**
- * This method applies to standard password authentication schemes only.
- * This is NOT the primary authentication method.
- * 
- * @see authenticate:error:
- * 
- * This method exists for backwards compatibility, and may disappear in future versions.
-**/
-- (BOOL)authenticateWithPassword:(NSString *)password error:(NSError **)errPtr;
-
-/**
- * Returns whether or not the xmpp stream is currently authenticating with the XMPP Server.
-**/
-- (BOOL)isAuthenticating;
 
 /**
  * Returns whether or not the xmpp stream has successfully authenticated with the server.
@@ -538,37 +317,6 @@ extern const NSTimeInterval XMPPStreamTimeoutNone;
  * Returns the date when the xmpp stream successfully authenticated with the server.
  **/
 - (NSDate *)authenticationDate;
-
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-#pragma mark Compression
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-
-/**
- * Returns the server's list of supported compression methods in accordance to XEP-0138: Stream Compression
- * Each item in the array will be of type NSString.
- *
- * For example, if the server supplied this stanza within it's reported stream:features:
- *
- * <compression xmlns='http://jabber.org/features/compress'>
- *	  <method>zlib</method>
- *    <method>lzw</method>
- * </compression>
- *
- * Then this method would return [@"zlib", @"lzw"].
- **/
-- (NSArray *)supportedCompressionMethods;
-
-
-/**
- * Returns whether or not the given compression method name was specified in the
- * server's list of supported compression methods.
- *
- * Note: The XMPPStream doesn't currently support any compression methods 
-**/
-
-- (BOOL)supportsCompressionMethod:(NSString *)compressionMethod;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #pragma mark Server Info
@@ -587,12 +335,6 @@ extern const NSTimeInterval XMPPStreamTimeoutNone;
 **/
 - (NSXMLElement *)rootElement;
 
-/**
- * Returns the version attribute from the servers's <stream:stream/> element.
- * This should be at least 1.0 to be RFC 3920 compliant.
- * If no version number was set, the server is not RFC compliant, and 0 is returned.
-**/
-- (float)serverXmppStreamVersionNumber;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #pragma mark Sending
@@ -800,106 +542,12 @@ extern const NSTimeInterval XMPPStreamTimeoutNone;
 - (void)xmppStream:(XMPPStream *)sender socketDidConnect:(GCDAsyncSocket *)socket;
 
 /**
- * This method is called after a TCP connection has been established with the server,
- * and the opening XML stream negotiation has started.
-**/
-- (void)xmppStreamDidStartNegotiation:(XMPPStream *)sender;
-
-/**
- * This method is called immediately prior to the stream being secured via TLS/SSL.
- * Note that this delegate may be called even if you do not explicitly invoke the startTLS method.
- * Servers have the option of requiring connections to be secured during the opening process.
- * If this is the case, the XMPPStream will automatically attempt to properly secure the connection.
- * 
- * The dictionary of settings is what will be passed to the startTLS method of the underlying GCDAsyncSocket.
- * The GCDAsyncSocket header file contains a discussion of the available key/value pairs,
- * as well as the security consequences of various options.
- * It is recommended reading if you are planning on implementing this method.
- * 
- * The dictionary of settings that are initially passed will be an empty dictionary.
- * If you choose not to implement this method, or simply do not edit the dictionary,
- * then the default settings will be used.
- * That is, the kCFStreamSSLPeerName will be set to the configured host name,
- * and the default security validation checks will be performed.
- * 
- * This means that authentication will fail if the name on the X509 certificate of
- * the server does not match the value of the hostname for the xmpp stream.
- * It will also fail if the certificate is self-signed, or if it is expired, etc.
- * 
- * These settings are most likely the right fit for most production environments,
- * but may need to be tweaked for development or testing,
- * where the development server may be using a self-signed certificate.
- * 
- * Note: If your development server is using a self-signed certificate,
- * you likely need to add GCDAsyncSocketManuallyEvaluateTrust=YES to the settings.
- * Then implement the xmppStream:didReceiveTrust:completionHandler: delegate method to perform custom validation.
-**/
-- (void)xmppStream:(XMPPStream *)sender willSecureWithSettings:(NSMutableDictionary *)settings;
-
-/**
- * Allows a delegate to hook into the TLS handshake and manually validate the peer it's connecting to.
- *
- * This is only called if the stream is secured with settings that include:
- * - GCDAsyncSocketManuallyEvaluateTrust == YES
- * That is, if a delegate implements xmppStream:willSecureWithSettings:, and plugs in that key/value pair.
- *
- * Thus this delegate method is forwarding the TLS evaluation callback from the underlying GCDAsyncSocket.
- *
- * Typically the delegate will use SecTrustEvaluate (and related functions) to properly validate the peer.
- *
- * Note from Apple's documentation:
- *   Because [SecTrustEvaluate] might look on the network for certificates in the certificate chain,
- *   [it] might block while attempting network access. You should never call it from your main thread;
- *   call it only from within a function running on a dispatch queue or on a separate thread.
- *
- * This is why this method uses a completionHandler block rather than a normal return value.
- * The idea is that you should be performing SecTrustEvaluate on a background thread.
- * The completionHandler block is thread-safe, and may be invoked from a background queue/thread.
- * It is safe to invoke the completionHandler block even if the socket has been closed.
- * 
- * Keep in mind that you can do all kinds of cool stuff here.
- * For example:
- * 
- * If your development server is using a self-signed certificate,
- * then you could embed info about the self-signed cert within your app, and use this callback to ensure that
- * you're actually connecting to the expected dev server.
- * 
- * Also, you could present certificates that don't pass SecTrustEvaluate to the client.
- * That is, if SecTrustEvaluate comes back with problems, you could invoke the completionHandler with NO,
- * and then ask the client if the cert can be trusted. This is similar to how most browsers act.
- * 
- * Generally, only one delegate should implement this method.
- * However, if multiple delegates implement this method, then the first to invoke the completionHandler "wins".
- * And subsequent invocations of the completionHandler are ignored.
-**/
-- (void)xmppStream:(XMPPStream *)sender didReceiveTrust:(SecTrustRef)trust
-                                      completionHandler:(void (^)(BOOL shouldTrustPeer))completionHandler;
-
-/**
- * This method is called after the stream has been secured via SSL/TLS.
- * This method may be called if the server required a secure connection during the opening process,
- * or if the secureConnection: method was manually invoked.
-**/
-- (void)xmppStreamDidSecure:(XMPPStream *)sender;
-
-/**
  * This method is called after the XML stream has been fully opened.
  * More precisely, this method is called after an opening <xml/> and <stream:stream/> tag have been sent and received,
  * and after the stream features have been received, and any required features have been fullfilled.
  * At this point it's safe to begin communication with the server.
 **/
 - (void)xmppStreamDidConnect:(XMPPStream *)sender;
-
-/**
- * This method is called after registration of a new user has successfully finished.
- * If registration fails for some reason, the xmppStream:didNotRegister: method will be called instead.
-**/
-- (void)xmppStreamDidRegister:(XMPPStream *)sender;
-
-/**
- * This method is called if registration fails.
-**/
-- (void)xmppStream:(XMPPStream *)sender didNotRegister:(NSXMLElement *)error;
 
 /**
  * This method is called after authentication has successfully finished.
@@ -911,19 +559,6 @@ extern const NSTimeInterval XMPPStreamTimeoutNone;
  * This method is called if authentication fails.
 **/
 - (void)xmppStream:(XMPPStream *)sender didNotAuthenticate:(NSXMLElement *)error;
-
-/**
- * Binding a JID resource is a standard part of the authentication process,
- * and occurs after SASL authentication completes (which generally authenticates the JID username).
- * 
- * This delegate method allows for a custom binding procedure to be used.
- * For example:
- * - a custom SASL authentication scheme might combine auth with binding
- * - stream management (xep-0198) replaces binding if it can resume a previous session
- * 
- * Return nil (or don't implement this method) if you wish to use the standard binding procedure.
-**/
-- (id <XMPPCustomBinding>)xmppStreamWillBind:(XMPPStream *)sender;
 
 /**
  * This method is called if the XMPP server doesn't allow our resource of choice
@@ -1084,21 +719,6 @@ extern const NSTimeInterval XMPPStreamTimeoutNone;
 **/
 - (void)xmppStreamDidDisconnect:(XMPPStream *)sender withError:(NSError *)error;
 
-/**
- * This method is only used in P2P mode when the connectTo:withAddress: method was used.
- * 
- * It allows the delegate to read the <stream:features/> element if/when they arrive.
- * Recall that the XEP specifies that <stream:features/> SHOULD be sent.
-**/
-- (void)xmppStream:(XMPPStream *)sender didReceiveP2PFeatures:(NSXMLElement *)streamFeatures;
-
-/**
- * This method is only used in P2P mode when the connectTo:withSocket: method was used.
- * 
- * It allows the delegate to customize the <stream:features/> element,
- * adding any specific featues the delegate might support.
-**/
-- (void)xmppStream:(XMPPStream *)sender willSendP2PFeatures:(NSXMLElement *)streamFeatures;
 
 /**
  * These methods are called as xmpp modules are registered and unregistered with the stream.

@@ -6,7 +6,7 @@
 @protocol XMPPStreamManagementStorage;
 
 
-@interface XMPPStreamManagement : XMPPModule <XMPPCustomBinding>
+@interface XMPPStreamManagement : XMPPModule
 
 /**
  * The XMPPStreamManagement extension implements XEP-0198:
@@ -20,98 +20,15 @@
  * @param queue
  *   The standard dispatch_queue option, with which to run the extension on.
 **/
+
+- (id)initDefault;
 - (id)initWithStorage:(id <XMPPStreamManagementStorage>)storage;
 - (id)initWithStorage:(id <XMPPStreamManagementStorage>)storage dispatchQueue:(dispatch_queue_t)queue;
 
 @property (nonatomic, strong, readonly) id <XMPPStreamManagementStorage> storage;
 
-#pragma mark Enable
-
-/**
- * This method sends the <enable> stanza to the server to request enabling stream management.
- *
- * XEP-0198 specifies that the <enable> stanza should only be sent by clients after authentication,
- * and after binding has occurred.
- * 
- * The servers response is reported via the delegate methods:
- * @see xmppStreamManagement:wasEnabled:
- * @see xmppStreamManagement:wasNotEnabled:
- *
- * @param supportsResumption
- *   Whether the client should request resumptions support.
- *   If YES, the resume attribute will be included. E.g. <enable resume='true'/>
- * 
- * @param maxTimeout
- *   Allows you to specify the client's preferred maximum resumption time.
- *   This is optional, and will only be sent if you provide a positive value (maxTimeout > 0.0).
- *   Note that XEP-0198 only supports sending this value in seconds.
- *   So it the provided maxTimeout includes millisecond precision, this will be ignored via truncation
- *   (rounding down to nearest whole seconds value).
- * 
- * @see supportsStreamManagement
-**/
-- (void)enableStreamManagementWithResumption:(BOOL)supportsResumption maxTimeout:(NSTimeInterval)maxTimeout;
 
 #pragma mark Resume
-
-/**
- * If set to YES, then the extension will automatically attempt to resume any sessions that appear resumable.
- *
- * That is, if the canResumeStream method would return YES, then the module will automatically plug into the xmppStream,
- * and attempts to resume the session. If the attempt fails, the xmppStream will automatically fall back to
- * the standard binding process.
- *
- * Remember: If the extension does not believe that resumption is possible, then it won't attempt to resume.
- * That is, if it doesn't have data in storage that matches the current connection, or the data is expired,
- * then it allows the xmppStream to perform standard binding immediately, without attempting to resume.
- *
- * If you wish to handle stream resumption manually, then you can simply implement xmppStreamWillBind:,
- * and return this extension instance according to your own conditions.
- * 
- * In order to determine if a stream was resumed, you should invoke didResumeWithAckedStanzaIds:serverResponse:
- * from within the xmppStreamDidAuthenticate: callback.
- *
- * The default value is NO.
-**/
-@property (atomic, readwrite) BOOL autoResume;
-
-/**
- * This method is meant to be called by other extensions when they receive an xmppStreamDidAuthenticate callback.
- * 
- * Returns YES if the stream was resumed during the authentication process.
- * Returns NO otherwise (if resume wasn't available, or it failed).
- * 
- * Other extensions may wish to skip certain setup processes that aren't
- * needed if the stream was resumed (since the previous session state has been restored server-side).
-**/
-@property (atomic, readonly) BOOL didResume;
-
-/**
- * This method is meant to be called when you receive an xmppStreamDidAuthenticate callback.
- *
- * It is used instead of a standard delegate method in order to provide a cleaner API.
- * By using this method, one can put all the logic for handling authentication in a single place.
- * But more importantly, it solves several subtle timing and threading issues.
- *
- * > A delegate method could have hit either before or after xmppStreamDidAuthenticate, depending on thread scheduling.
- * > We could have queued it up, and forced it to hit after.
- * > But your code would likely still have needed to add a check within xmppStreamDidAuthenticate...
- *
- * @param stanzaIdsPtr (optional)
- *   Just like the stanzaIdsPtr provided in xmppStreamManagement:didReceiveAckForStanzaIds:.
- *   This comes from the h value provided within the <resumed h='X'/> stanza sent by the server.
- * 
- * @param responsePtr (optional)
- *   Returns the response we got from the server. Either <resumed/> or <failed/>.
- *   This will be nil if resume wasn't tried.
- * 
- * @return
- *   YES if the stream was resumed.
- *   NO otherwise.
-**/
-- (BOOL)didResumeWithAckedStanzaIds:(NSArray **)stanzaIdsPtr
-					 serverResponse:(NSXMLElement **)responsePtr;
-
 /**
  * Returns YES if the stream can be resumed.
  * 
@@ -119,7 +36,10 @@
  * and the timeout from the last stream has not been exceeded.
 **/
 - (BOOL)canResumeStream;
-
+- (void)resetState;
+- (void)processResumed:(NSXMLElement *)resumed;
+- (uint32_t) lastHandledCount;
+- (NSString *) smSessionId;
 
 #pragma mark Requesting Acks
 
@@ -609,9 +529,5 @@
 
 @interface XMPPStream (XMPPStreamManagement)
 
-/**
- * Returns whether or not the server's <stream:features> includes <sm xmlns='urn:xmpp:sm:3'/>.
-**/
-- (BOOL)supportsStreamManagement;
 
 @end

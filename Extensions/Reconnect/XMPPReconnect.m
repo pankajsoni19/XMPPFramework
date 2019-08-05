@@ -597,14 +597,7 @@ static void XMPPReconnectReachabilityCallback(SCNetworkReachabilityRef target, S
 						[self setMultipleReachabilityChanges:NO];
 						previousReachabilityFlags = reachabilityFlags;
 						
-                        if (self.usesOldSchoolSecureConnect)
-                        {
-                            [xmppStream oldSchoolSecureConnectWithTimeout:XMPPStreamTimeoutNone error:nil];
-                        }
-                        else
-                        {
-                            [xmppStream connectWithTimeout:XMPPStreamTimeoutNone error:nil];
-                        }
+                        [xmppStream connectWithTimeout:XMPPStreamTimeoutNone error:nil];
 					}
 					else if ([self multipleReachabilityChanges])
 					{
